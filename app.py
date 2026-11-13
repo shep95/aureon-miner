@@ -7,6 +7,11 @@ POST /ledger                 {machine, site, hashprice_btc_th_day | chain, btc_u
 POST /breakeven              {machine, hashprice_btc_th_day | chain, btc_usd, pool_fee?}
 POST /mine-vs-buy            {machine, site, hashprice_btc_th_day | chain, btc_usd, run_days, monthly_hashprice_decay?}
 POST /max-capex              {hashprice_btc_th_day | chain, btc_usd, run_days, pool_fee?, monthly_hashprice_decay?}
+GET  /chains                 supported chains, snapshot data, which have payout addresses
+POST /plan                   {tariff_usd_kwh, cap_usd_day?, horizon_days?, difficulty_growth_monthly?,
+                              pool_fee?, chains?: {SYM: {price_usd?, network_hashrate?, block_reward?}},
+                              stake?: {SYM: {apr?, price_usd?}}}
+                             fleet size and economics to reach cap_usd_day per chain (max $3,000)
 
 "chain" = {difficulty, subsidy_btc, avg_fees_btc}; use it instead of a hashprice.
 """
@@ -19,7 +24,11 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from dataclasses import replace
+
 import aureon_core as core
+import chains as mc
+from addresses import configured_addresses
 from payout import payout_address, stratum_config
 
 MAX_BODY = 16 * 1024
@@ -27,6 +36,8 @@ MAX_RUN_DAYS = 3650
 SOCKET_TIMEOUT_S = 10
 RATE_LIMIT_PER_MIN = int(os.environ.get("RATE_LIMIT_PER_MIN", "120"))
 TRUST_PROXY = os.environ.get("TRUST_PROXY", "1") == "1"  # railway sits behind a proxy
+# hard ceiling on revenue planned per chain per day; env may lower it, never raise it
+MAX_CAP_USD_DAY = min(3000.0, float(os.environ.get("MAX_CAP_USD_DAY", "3000")))
 
 
 _LOG_LOCK = threading.Lock()
@@ -137,6 +148,67 @@ def _decay(body):
     return _num(body, "monthly_hashprice_decay", hi=0.99, default=0.0)
 
 
+_CHAIN_FIELDS = {"price_usd": 1e9, "network_hashrate": 1e30, "block_reward": 1e9}
+_STAKE_FIELDS = {"apr": 1.0, "price_usd": 1e9}
+
+
+def _overrides(body, key, base, fields):
+    raw = body.get(key, {})
+    if not isinstance(raw, dict):
+        raise BadInput(f"{key} must be a json object")
+    out = dict(base)
+    for sym, vals in raw.items():
+        if sym not in base:
+            raise BadInput(f"unknown {key} symbol: {str(sym)[:16]}")
+        if not isinstance(vals, dict):
+            raise BadInput(f"{key}.{sym} must be a json object")
+        _no_extra(vals, set(fields), f"{key}.{sym}")
+        out[sym] = replace(base[sym], **{f: _num(vals, f, lo_open=True, hi=hi) for f, hi in fields.items() if f in vals})
+    return out
+
+
+def _plan(b):
+    tariff = _num(b, "tariff_usd_kwh", hi=100)
+    cap = _num(b, "cap_usd_day", lo_open=True, hi=MAX_CAP_USD_DAY, default=MAX_CAP_USD_DAY)
+    horizon = b.get("horizon_days", 365)
+    if isinstance(horizon, bool) or not isinstance(horizon, int) or not 1 <= horizon <= 1095:
+        raise BadInput("horizon_days must be an integer 1..1095")
+    growth = _num(b, "difficulty_growth_monthly", hi=0.5, default=0.02)
+    fee = _pool_fee(b)
+    chains = _overrides(b, "chains", mc.CHAINS, _CHAIN_FIELDS)
+    stakes = _overrides(b, "stake", mc.STAKING, _STAKE_FIELDS)
+    addrs = configured_addresses()
+    pow_ = [mc.plan_pow(t, tariff, cap, chains=chains, pool_fee=fee, horizon_days=horizon,
+                        difficulty_growth_monthly=growth) for t in mc.TARGETS]
+    for p, t in zip(pow_, mc.TARGETS.values()):
+        p["payout_ready"] = all(s in addrs for s in t.chains)
+    return {"tariff_usd_kwh": tariff, "cap_usd_day": cap, "pow": pow_,
+            "stake": [mc.plan_stake(s, cap, stakes=stakes) for s in mc.STAKING]}
+
+
+def _chains_info():
+    addrs = configured_addresses()
+    return {
+        "pow": [{"symbol": c.symbol, "name": c.name, "algorithm": c.algorithm, "price_usd": c.price_usd,
+                 "network_hashrate": c.network_hashrate, "block_reward": c.block_reward,
+                 "block_time_s": c.block_time_s, "payout_address": addrs.get(c.symbol)}
+                for c in mc.CHAINS.values()],
+        "stake": [{"symbol": s.symbol, "name": s.name, "apr": s.apr, "price_usd": s.price_usd}
+                  for s in mc.STAKING.values()],
+        "max_cap_usd_day": MAX_CAP_USD_DAY,
+        "snapshot": "mid-November 2026 public figures; override per request in POST /plan",
+    }
+
+
+def _payout_all():
+    cfg = stratum_config()
+    addrs = configured_addresses()
+    cfg["chains"] = {sym: {"address": a, "stratum_user": f"{a}.aureon01" if sym != "XMR" else a,
+                           "pools": list(mc.CHAINS[sym].pools)} for sym, a in addrs.items()}
+    cfg["missing"] = [s for s in mc.CHAINS if s not in addrs]
+    return cfg
+
+
 ROUTES = {
     "/hashprice": lambda b: {"hashprice_btc_th_day": _chain_hashprice(b)},
     "/ledger": lambda b: core.daily_ledger(_machine(b), _site(b), _hashprice(b), _price(b)),
@@ -146,12 +218,17 @@ ROUTES = {
         _machine(b), _site(b), _hashprice(b), _price(b), _run_days(b), _decay(b)),
     "/max-capex": lambda b: {"max_capex_usd_per_th": core.max_capex_per_th(
         _hashprice(b), _price(b), _run_days(b), _pool_fee(b), _decay(b))},
+    "/plan": _plan,
 }
 
 
 def _finite(obj):
     """json has no inf/nan; report them as null rather than emit invalid json."""
-    return {k: (None if isinstance(v, float) and not math.isfinite(v) else v) for k, v in obj.items()}
+    if isinstance(obj, dict):
+        return {k: _finite(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_finite(v) for v in obj]
+    return None if isinstance(obj, float) and not math.isfinite(obj) else obj
 
 
 # ---------------------------------------------------------------- rate limit
@@ -224,11 +301,13 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path in ("/", "/health"):
             return self._send(200, {"ok": True, "service": "aureon",
-                                    "routes": ["GET /payout", *(f"POST {r}" for r in ROUTES)]})
+                                    "routes": ["GET /payout", "GET /chains", *(f"POST {r}" for r in ROUTES)]})
         if self._limited():
             return
         if path == "/payout":
-            return self._send(200, stratum_config())
+            return self._send(200, _finite(_payout_all()))
+        if path == "/chains":
+            return self._send(200, _finite(_chains_info()))
         self._send(404, {"error": "not found"})
 
     do_HEAD = do_GET
@@ -324,6 +403,7 @@ class Server(ThreadingHTTPServer):
 
 def main():
     addr = payout_address()  # fail fast on a bad address
+    others = configured_addresses()  # and on any other chain's
     port = int(os.environ.get("PORT", "8000"))
     srv = Server(("0.0.0.0", port), Handler)
 
@@ -332,7 +412,7 @@ def main():
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    log(f"aureon listening on :{port}, payout -> {addr}")
+    log(f"aureon listening on :{port}, payout -> {addr}; chains with payout: {', '.join(others)}")
     srv.serve_forever()
     srv.server_close()
     log("aureon stopped")

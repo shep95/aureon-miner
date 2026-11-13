@@ -26,3 +26,16 @@ jobs:
           for i in $(seq 1 20); do curl -sf localhost:8000/health && break; sleep 0.5; done
           curl -sf localhost:8000/payout | grep -q bc1q
           test "$(docker exec aureon id -u)" = "10001"
+          curl -sf -X POST localhost:8000/plan -H 'Content-Type: application/json' -d '{"tariff_usd_kwh":0.05}' | grep -q kheavyhash
+  portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: ./build_portable.sh
+      - name: runs alone, outside the repo
+        run: |
+          mkdir /tmp/usb && cp dist/aureon.pyz /tmp/usb/ && cd /tmp/usb
+          python -I aureon.pyz plan 0.05 | grep -q sha256

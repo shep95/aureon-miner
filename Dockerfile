@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 RUN useradd --system --uid 10001 --no-create-home aureon
-COPY --chown=root:root --chmod=0444 aureon_core.py payout.py app.py ./
+COPY --chown=root:root --chmod=0444 aureon_core.py payout.py addresses.py chains.py app.py ./
 
 USER aureon
 EXPOSE 8000
