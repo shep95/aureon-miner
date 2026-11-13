@@ -52,6 +52,7 @@ def daily_ledger(m: Machine, s: Site, hp_btc_th_day: float, btc_usd: float) -> d
     net = revenue + heat_credit - power_cost - s.wear_usd_day
     return {
         "kwh_day": kwh,
+        "btc_day": btc,
         "sats_day": btc * SATS_PER_BTC,
         "revenue_usd": revenue,
         "power_cost_usd": power_cost,
@@ -77,7 +78,7 @@ def mine_vs_buy(m: Machine, s: Site, hp_btc_th_day: float, btc_usd: float,
     for d in range(run_days):
         hp = hp_btc_th_day * (1 - monthly_hashprice_decay) ** (d / 30)
         led = daily_ledger(m, s, hp, btc_usd)
-        mined_btc += m.th * hp * (1 - s.pool_fee)
+        mined_btc += led["btc_day"]
         extra_cash += led["power_cost_usd"] - led["heat_credit_usd"] + s.wear_usd_day
     spend = m.capex_usd + max(extra_cash, 0.0)
     bought_btc = spend / btc_usd

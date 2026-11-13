@@ -2,7 +2,7 @@
 name = "aureon-core"
 version = "2.0.0"
 description = "Heat-and-surplus bitcoin mining decision math"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
