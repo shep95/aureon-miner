@@ -9,7 +9,7 @@ daily profit after heat and solar credits, and an honest *mine vs. just buy bitc
 
 ![python](https://img.shields.io/badge/python-3.10%2B-3776ab?style=flat-square&logo=python&logoColor=white)
 ![deps](https://img.shields.io/badge/runtime%20deps-0-22c55e?style=flat-square)
-![tests](https://img.shields.io/badge/tests-52%20passing-22c55e?style=flat-square)
+![tests](https://img.shields.io/badge/tests-58%20passing-22c55e?style=flat-square)
 ![railway](https://img.shields.io/badge/deploy-railway-0b0d0e?style=flat-square&logo=railway&logoColor=white)
 ![docker](https://img.shields.io/badge/container-non--root-2496ed?style=flat-square&logo=docker&logoColor=white)
 
@@ -205,6 +205,28 @@ curl -s -X POST localhost:8000/mine-vs-buy \
 
 ---
 
+## 📈 Income simulation
+
+```bash
+python simulate.py
+```
+
+Runs every setup through 24 months, day by day: hashprice recomputed from growing difficulty,
+the April 2028 halving, bear/base/bull BTC prices, and heating seasons. Each day the miner runs
+only if aureon says it pays. `--json` gives the full monthly breakdown.
+
+| Setup (base market) | Runs | Cash P/L | vs buying BTC |
+|---|---|---|---|
+| S21 on 15¢ grid, always on | 100% | 🔴 −$8,479 | 0.30× |
+| S21 on 15¢ grid, following aureon | 0% | stays off; don't buy it | n/a |
+| S21 heating a home | 45% | 🔴 −$1,389 | 0.58× |
+| **Used $500 S19 heating a home** | 38% | 🟢 **+$81** | **1.13×** |
+| S21 on solar surplus | 40% | 🔴 −$2,822 | 0.41× |
+| 10× used S21 at 5¢ | 60% | 🔴 −$11,832 | 0.66× |
+
+The result is consistent: at today's hashprice, **only cheap used hardware whose power cost is covered by heat
+beats buying bitcoin**, and it earns a few dollars a month, not a living. The aureon server itself mines nothing.
+
 ## 🧪 Development
 
 ```bash
@@ -215,14 +237,15 @@ pip install pytest
 pytest -q
 ```
 
-52 tests: the core math checked against published figures, every endpoint, hostile inputs
-(bad JSON, `NaN`, oversized bodies, negative `Content-Length`), rate limits and the connection cap.
+58 tests: the core math checked against published figures, every endpoint, hostile inputs
+(bad JSON, `NaN`, oversized bodies, negative `Content-Length`), rate limits, the connection cap, and the simulator (halving, heating seasons, run/idle decisions).
 CI runs them on Python 3.10, 3.12 and 3.13, then builds the container and smoke-tests it.
 
 ```
 aureon_core.py   pure decision math, no I/O
 payout.py        bech32 address validation and stratum settings
 app.py           hardened stdlib HTTP API
+simulate.py      day-by-day 24-month income simulation
 Dockerfile       non-root runtime image
 railway.json     Railway build, health check and restart policy
 ```
